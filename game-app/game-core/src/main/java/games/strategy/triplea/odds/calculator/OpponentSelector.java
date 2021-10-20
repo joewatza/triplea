@@ -2,6 +2,8 @@ package games.strategy.triplea.odds.calculator;
 
 import games.strategy.engine.data.GameData;
 import games.strategy.engine.data.GamePlayer;
+import games.strategy.engine.data.PlayerList;
+import games.strategy.engine.data.RelationshipTracker;
 import games.strategy.engine.data.Territory;
 import games.strategy.triplea.delegate.Matches;
 import java.util.List;
@@ -31,10 +33,13 @@ public class OpponentSelector {
   }
 
   @Nullable private final GamePlayer currentPlayer;
+  private final PlayerList playerList;
+  private final RelationshipTracker relationshipTracker;
 
   public static OpponentSelector with(final GameData gameData) {
     return OpponentSelector.builder()
         .currentPlayer(gameData.getSequence().getStep().getPlayerId())
+        .playerList(gameData.getPlayerList())
         .build();
   }
 
@@ -43,15 +48,12 @@ public class OpponentSelector {
    *
    * <p>Please read the source code for the order of the players and conditions involved.
    */
-  public AttackerAndDefender getAttackerAndDefender(
-      final Territory territory, final GameData data) {
+  public AttackerAndDefender getAttackerAndDefender(final Territory territory) {
     if (territory == null) {
       // Not much to derive here. Pick attacker first, then defender and priorities the current
       // player if possible.
-      return getAttackerAndDefenderWithCurrentPlayerPriority(data);
+      return getAttackerAndDefenderWithCurrentPlayerPriority();
     } else {
-      data.acquireReadLock();
-      try {
         // If there is no current player, we cannot choose an opponent.
         if (currentPlayer == null) {
           return AttackerAndDefender.builder().build();
@@ -66,15 +68,12 @@ public class OpponentSelector {
         final List<GamePlayer> playersWithUnits =
             territory.getUnitCollection().getPlayersByUnitCount();
         final Optional<GamePlayer> defender =
-            getOpponentWithPriorityList(currentPlayer, playersWithUnits, data);
+            getOpponentWithPriorityList(currentPlayer, playersWithUnits);
 
         return AttackerAndDefender.builder()
             .attacker(Optional.ofNullable(currentPlayer))
             .defender(defender)
             .build();
-      } finally {
-        data.releaseReadLock();
-      }
     }
   }
 
@@ -98,13 +97,10 @@ public class OpponentSelector {
    *
    * <p>If the game has no players, empty optionals are returned.
    *
-   * @param data the game data
    * @return attacker and defender
    */
-  private AttackerAndDefender getAttackerAndDefenderWithCurrentPlayerPriority(
-      final GameData data) {
-    return getAttackerAndDefenderWithPriorityList(
-        List.of(currentPlayer), data);
+  private AttackerAndDefender getAttackerAndDefenderWithCurrentPlayerPriority() {
+    return getAttackerAndDefenderWithPriorityList(List.of(currentPlayer));
   }
 
   /**
@@ -132,14 +128,13 @@ public class OpponentSelector {
    * <p>If the game has no players, empty optionals are returned.
    *
    * @param priorityPlayers an ordered list of players which should be considered first
-   * @param data the game data
    * @return attacker and defender
    */
-  private static AttackerAndDefender getAttackerAndDefenderWithPriorityList(
-      final List<GamePlayer> priorityPlayers, final GameData data) {
+  private AttackerAndDefender getAttackerAndDefenderWithPriorityList(
+      final List<GamePlayer> priorityPlayers) {
     // Attacker
     final Optional<GamePlayer> attacker =
-        Stream.of(priorityPlayers.stream(), data.getPlayerList().stream())
+        Stream.of(priorityPlayers.stream(), playerList.stream())
             .flatMap(s -> s)
             .findFirst();
     if (attacker.isEmpty()) {
@@ -151,7 +146,7 @@ public class OpponentSelector {
     // Defender
     assert (!attacker.isEmpty());
     final Optional<GamePlayer> defender =
-        getOpponentWithPriorityList(attacker.get(), priorityPlayers, data);
+        getOpponentWithPriorityList(attacker.get(), priorityPlayers);
     return AttackerAndDefender.builder().attacker(attacker).defender(defender).build();
   }
 
@@ -172,23 +167,22 @@ public class OpponentSelector {
    *
    * @param p the player to find an opponent for
    * @param priorityPlayers an ordered list of players which should be considered first
-   * @param data the game data
    * @return an opponent. An empty optional is returned if the game has no players
    */
-  private static Optional<GamePlayer> getOpponentWithPriorityList(
-      final GamePlayer p, final List<GamePlayer> priorityPlayers, final GameData data) {
+  private Optional<GamePlayer> getOpponentWithPriorityList(
+      final GamePlayer p, final List<GamePlayer> priorityPlayers) {
     final Stream<GamePlayer> enemiesPriority =
-        priorityPlayers.stream().filter(Matches.isAtWar(p, data.getRelationshipTracker()));
+        priorityPlayers.stream().filter(Matches.isAtWar(p, relationshipTracker));
     final Stream<GamePlayer> neutralsPriority =
         priorityPlayers.stream()
-            .filter(Matches.isAtWar(p, data.getRelationshipTracker()).negate())
-            .filter(Matches.isAtWar(p, data.getRelationshipTracker()).negate());
+            .filter(Matches.isAtWar(p, relationshipTracker).negate())
+            .filter(Matches.isAtWar(p, relationshipTracker).negate());
     return Stream.of(
             enemiesPriority,
-            playersAtWarWith(p, data),
+            playersAtWarWith(p),
             neutralsPriority,
-            neutralPlayersTowards(p, data),
-            data.getPlayerList().stream())
+            neutralPlayersTowards(p),
+            playerList.stream())
         .flatMap(s -> s)
         .findFirst();
   }
@@ -213,7 +207,7 @@ public class OpponentSelector {
   private Optional<GamePlayer> getOpponentWithCurrentPlayerPriority(
       final GamePlayer p, final GameData data) {
     return getOpponentWithPriorityList(
-        p, getCurrentPlayer().stream().collect(Collectors.toList()), data);
+        p, getCurrentPlayer().stream().collect(Collectors.toList()));
   }
 
   private Optional<GamePlayer> getCurrentPlayer() {
@@ -225,8 +219,8 @@ public class OpponentSelector {
    *
    * <p>The returned stream might be empty.
    */
-  private static Stream<GamePlayer> playersAtWarWith(final GamePlayer p, final GameData data) {
-    return data.getPlayerList().stream().filter(Matches.isAtWar(p, data.getRelationshipTracker()));
+  private Stream<GamePlayer> playersAtWarWith(final GamePlayer p) {
+    return playerList.stream().filter(Matches.isAtWar(p, relationshipTracker));
   }
 
   /**
@@ -234,9 +228,9 @@ public class OpponentSelector {
    *
    * <p>The returned stream might be empty.
    */
-  private static Stream<GamePlayer> neutralPlayersTowards(final GamePlayer p, final GameData data) {
-    return data.getPlayerList().stream()
-        .filter(Matches.isAtWar(p, data.getRelationshipTracker()).negate())
-        .filter(Matches.isAllied(p, data.getRelationshipTracker()).negate());
+  private Stream<GamePlayer> neutralPlayersTowards(final GamePlayer p) {
+    return playerList.stream()
+        .filter(Matches.isAtWar(p, relationshipTracker).negate())
+        .filter(Matches.isAllied(p, relationshipTracker).negate());
   }
 }
